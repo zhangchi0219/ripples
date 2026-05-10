@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vite:*)",
+      "Bash(curl -s http://localhost:5173/)",
+      "Bash(curl -s http://localhost:5173/src/main.js)",
+      "Bash(curl -s http://localhost:5173/src/particles.js)",
+      "Bash(curl -s \"http://localhost:5173/src/shaders/wave.vert?import\")",
+      "Bash(curl -s \"http://localhost:5173/node_modules/.vite/deps/tweakpane.js?v=ae82d4f7\")",
+      "Bash(git add:*)"
+    ]
+  }
+}
