@@ -8,7 +8,7 @@ Guidance for AI assistants working in this repository.
 
 **Ripples** (internal name: `wave-interference`) is a browser-based interactive particle simulation. A 200×200 grid of GPU particles forms a "water surface"; clicking the canvas spawns circular ripples that expand outward and interfere with each other via linear superposition.
 
-**Tech stack**: Three.js r170 · GLSL (WebGL2) · Vite 6 · Tweakpane 4 · FastAPI (static file server only) · Docker Compose
+**Tech stack**: Three.js r170 · GLSL (WebGL2) · Vite 6 · Tweakpane 4 · Docker Compose
 
 ---
 
@@ -16,14 +16,10 @@ Guidance for AI assistants working in this repository.
 
 ```
 ripples/
-├── backend/
-│   ├── main.py              FastAPI app — only serves frontend/dist as static files
-│   ├── requirements.txt     fastapi + uvicorn[standard]
-│   └── Dockerfile           python:3.12-slim, exposes :8000
 ├── frontend/
 │   ├── index.html           Shell HTML: #app > #canvas-wrap > canvas, #panel
 │   ├── package.json         name: wave-interference, type: module
-│   ├── vite.config.js       glsl plugin + /api proxy → :8000 (or $API_URL)
+│   ├── vite.config.js       glsl plugin
 │   ├── Dockerfile           node:22-slim, runs `npm run dev -- --host 0.0.0.0`
 │   └── src/
 │       ├── main.js          Entry: renderer, camera, OrbitControls, main loop, resize, mouse
@@ -35,7 +31,7 @@ ripples/
 │       └── shaders/
 │           ├── wave.vert    Particle displacement + height → vH
 │           └── wave.frag    Color mapping + circular point-sprite clipping
-└── docker-compose.yml       backend :8000, frontend :5173, dist volume mount
+└── docker-compose.yml       frontend :5173
 ```
 
 ---
@@ -141,37 +137,24 @@ Defined in `main.js`, passed to `createParticleSystem` and `createUI`:
 
 ## Development Workflow
 
-### Local (without Docker)
+### Local
 
 ```bash
-# Terminal 1 — backend (optional for dev, only needed if you add API routes)
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-
-# Terminal 2 — frontend
 cd frontend
 npm install
 npm run dev
 # → http://localhost:5173
 ```
 
-### Docker Compose
+### Docker
 
 ```bash
-docker compose up -d --build          # start everything
-docker compose logs -f                # follow all logs
-docker compose logs -f frontend       # follow one service
-docker compose down                   # stop
-
-# After changing frontend source, rebuild only frontend:
-docker compose build frontend && docker compose up -d frontend
+docker compose up -d --build    # start frontend container
+docker compose logs -f          # follow logs
+docker compose down             # stop
 ```
 
-The `frontend/dist` volume is mounted read-only into the backend container (`/app/frontend/dist`). Backend serves `dist/` via FastAPI StaticFiles at `http://localhost:8000`.
-
-### Frontend Build
+### Build / Deploy
 
 ```bash
 cd frontend
@@ -179,7 +162,9 @@ npm run build    # outputs to frontend/dist/
 npm run preview  # preview the production build locally
 ```
 
-Vite uses `vite-plugin-glsl` to import `.vert` / `.frag` files directly as strings. The proxy `/api → :8000` is configured in `vite.config.js` (uses `$API_URL` env var, defaults to `http://localhost:8000`).
+`frontend/dist/` is a self-contained static site — serve it with any static host (nginx, GitHub Pages, Netlify, etc.).
+
+Vite uses `vite-plugin-glsl` to import `.vert` / `.frag` files directly as strings.
 
 ---
 
@@ -201,7 +186,7 @@ Vite uses `vite-plugin-glsl` to import `.vert` / `.frag` files directly as strin
 - Boundary reflections
 - Dispersion (all waves share one speed `c`)
 - 3D orbit camera (OrbitControls is present but left-click is blocked; right-drag rotates)
-- Backend API routes (FastAPI exists only to serve the built frontend)
+- Backend / server-side logic (pure client-side app)
 - Audio reactivity or video input
 
 ---
