@@ -1,284 +1,199 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project
-
-Ripples — a new project. No code has been added yet. Update this file as the project develops.
-# Wave Interference Particle Field
-
-一个基于 three.js + 原生 GLSL 的 web app：粒子组成的二维水面，鼠标点击在水面上投下波纹，多个波纹之间产生真实的线性干涉。
+Guidance for AI assistants working in this repository.
 
 ---
 
-## 项目目标
+## Project Overview
 
-- 一个 N×N 的粒子网格作为「水面」（默认 256×256 = 65536 个粒子）。
-- 鼠标点击 canvas 任意位置生成一个新的圆形波纹，从点击处向外扩散。
-- 同时最多 32 个活跃波纹，自动衰减消失，按环形缓冲覆盖。
-- 多个波纹的位移**线性叠加**，自动产生干涉条纹（相长 / 相消）。
-- 粒子用高度上色，呈现波峰波谷的可视化。
-- 右侧 tweakpane 面板控制：粒子密度、波速、波长、振幅、衰减、最大波数。
+**Ripples** (internal name: `wave-interference`) is a browser-based interactive particle simulation. A 200×200 grid of GPU particles forms a "water surface"; clicking the canvas spawns circular ripples that expand outward and interfere with each other via linear superposition.
+
+**Tech stack**: Three.js r170 · GLSL (WebGL2) · Vite 6 · Tweakpane 4 · Docker Compose
 
 ---
 
-## 技术选型与原理
+## Repository Layout
 
-### 路线：解析叠加法（不是 PDE 模拟）
+```
+ripples/
+├── frontend/
+│   ├── index.html           Shell HTML: #app > #canvas-wrap > canvas, #panel
+│   ├── package.json         name: wave-interference, type: module
+│   ├── vite.config.js       glsl plugin
+│   ├── Dockerfile           node:22-slim, runs `npm run dev -- --host 0.0.0.0`
+│   └── src/
+│       ├── main.js          Entry: renderer, camera, OrbitControls, main loop, resize, mouse
+│       ├── particles.js     createParticleSystem() — BufferGeometry + ShaderMaterial
+│       ├── waves.js         WaveManager class — ring buffer + uniform upload
+│       ├── picker.js        canvasToWorld() — pointer → z=0 world plane via Raycaster
+│       ├── ui.js            createUI() — Tweakpane panel wired to params object
+│       ├── style.css        Two-column flex layout (canvas-wrap | panel)
+│       └── shaders/
+│           ├── wave.vert    Particle displacement + height → vH
+│           └── wave.frag    Color mapping + circular point-sprite clipping
+└── docker-compose.yml       frontend :5173
+```
 
-每个波是一个数学函数，不模拟波动方程。这一帧，对每个粒子，遍历所有活跃波，把它们的贡献相加。
+---
 
-第 i 个波在位置 (x,y) 时刻 t 的贡献是：
+## Architecture: Analytic Superposition (not PDE simulation)
 
+Each wave is a pure math function. Every frame, for every particle, all active waves are summed in the vertex shader on the GPU. No ping-pong textures, no simulation passes.
+
+Wave contribution formula:
 ```
 hᵢ(x,y,t) = Aᵢ · envelope(τ, r) · sin(k·r − ω·τ + φᵢ)
 
-其中:
-  τ = t − t₀ᵢ           // 自波诞生以来的时间
-  r = |(x,y) − originᵢ| // 粒子到波原点的距离
-  k = 2π / λ            // 波数 (wavenumber)，λ 是波长
-  ω = 2π · f            // 角频率, f 是频率
-  c = ω / k             // 波相速度
+  τ = t − t₀ᵢ           elapsed since wave birth
+  r = |(x,y) − originᵢ| particle distance from wave origin
+  k = 2π / λ             wavenumber
+  ω = k · c              angular frequency (c = wave speed)
 ```
 
-总位移就是 `h(x,y,t) = Σᵢ hᵢ`。这就是物理上的线性叠加原理——干涉是免费的。
+Total height: `h = Σ hᵢ` — linear superposition gives interference for free.
 
-### 包络函数（envelope）
-
-为什么需要包络？纯 sin 是无限大无衰减的，那粒子永远在抖。包络让波有「生命周期」和「波前」：
-
+**Envelope function** (prevents infinite undamped oscillation):
 ```glsl
 float envelope(float tau, float r, float c, float decay) {
     if (tau < 0.0) return 0.0;
-    float wavefront = c * tau;             // 波前到达的距离
+    float wavefront = c * tau;
     float leading   = smoothstep(wavefront + 0.5, wavefront - 0.5, r);
-    // r > wavefront 时是 0, 即「波还没到这里」
-    float timeDecay = exp(-decay * tau);   // 时间上指数衰减
-    float radial    = 1.0 / (1.0 + 0.5 * r); // 距离上 1/r 衰减（二维传播）
+    float timeDecay = exp(-decay * tau);
+    float radial    = 1.0 / (1.0 + 0.5 * r);
     return leading * timeDecay * radial;
 }
 ```
 
-### 为什么不用 GPGPU ping-pong
-
-传统 GPGPU 流体/波模拟用两张纹理交替读写来推进 PDE。我们不需要：
-- 粒子位置是**静态网格**，不动，只有 z 在 vertex shader 里被实时算出来。
-- 波的状态很小（几十个 vec4），用 **uniform 数组**直接传，不需要纹理。
-- 没有数值耗散问题，波形是数学纯净的。
-- shader 里只有一个 vertex + fragment，没有 simulation pass。
-
-如果以后想加反射、障碍物、连续介质效应，再切到 PDE 路线，那时候 ping-pong 才用得上。
-
-### 名词速查
-
-- **GLSL**: OpenGL Shading Language，写在 GPU 上跑的 C 风格小语言。
-- **Vertex shader**: 对每个顶点（这里是每个粒子）跑一次，决定它在屏幕上的位置。
-- **Fragment shader**: 对每个像素跑一次，决定它的颜色。
-- **Uniform**: CPU 给 GPU 的「全局变量」，每帧设一次，所有顶点/像素读到同一个值。可以是数组。
-- **Attribute**: 每个顶点不同的输入数据（这里是粒子的网格坐标 uv）。
-- **Varying**: 从 vertex shader 传给 fragment shader 的插值变量。
-- **NDC** (Normalized Device Coordinates): 屏幕坐标系，x 和 y 都在 [-1, 1]。鼠标 pixel 坐标要先转成 NDC 才能反投影到 3D 世界。
-
 ---
 
-## 项目结构
+## Key Implementation Details
 
-```
-wave-interference/
-├── backend/
-│   ├── main.py              FastAPI, 只用来 serve 静态文件 + 上传(可选)
-│   └── requirements.txt
-└── frontend/
-    ├── package.json
-    ├── vite.config.js       配置 /api 代理到 :8000
-    ├── index.html
-    └── src/
-        ├── main.js          renderer + scene + 主循环 + 鼠标监听
-        ├── particles.js     创建静态网格几何体 + ShaderMaterial
-        ├── waves.js         WaveManager: 环形缓冲 + uniform 上传
-        ├── picker.js        鼠标 pixel → NDC → 世界坐标 (z=0 平面)
-        ├── ui.js            tweakpane 控制面板
-        ├── style.css        Ableton 风两栏布局
-        └── shaders/
-            ├── wave.vert    粒子位移 + 颜色高度计算
-            └── wave.frag    点精灵着色
-```
+### Particle Geometry (`particles.js`)
 
-注意：scaffold 默认会生成 `position.frag` / `velocity.frag`（GPGPU 用），本项目**不需要**，可以删掉。
+- `THREE.BufferGeometry` + `THREE.Points` (not InstancedMesh)
+- Attribute name: `position` (Three.js built-in), xy = grid UV in [0,1], z = 0
+- World coordinates computed in vertex shader: `worldXY = (position.xy - 0.5) * uFieldSize`
+- Rebuilding particle resolution only requires recreating the attribute array — shaders unchanged
+- `points.frustumCulled = false` because position attribute holds UV coords, not world coords
 
----
+### Wave Uniform Layout (`waves.js` + `wave.vert`)
 
-## 关键实现细节
-
-### 粒子几何体
-
-用 `THREE.BufferGeometry` + `THREE.Points`，不是 `InstancedMesh`。每个粒子的 attribute 只有一个 `vec2 aGridUv`，范围 [0,1]×[0,1]。世界坐标在 vertex shader 里算出来：
-
+Two parallel `vec4` arrays, `MAX_WAVES = 32` slots:
 ```glsl
-vec2 worldXY = (aGridUv - 0.5) * uFieldSize;
-```
-
-改粒子密度只要重建几何体的 attribute 数组，shader 不用动。
-
-### 波列表的 uniform 布局
-
-每个波需要：origin(x,y), birthTime, amplitude, wavelength, decay, phase, active。一个 vec4 装不下，用两个并行数组：
-
-```glsl
-const int MAX_WAVES = 32;
 uniform vec4 uWaveA[MAX_WAVES];  // (originX, originY, birthTime, amplitude)
 uniform vec4 uWaveB[MAX_WAVES];  // (wavelength, decay, phase, active)
-uniform float uTime;
-uniform float uWaveSpeed;
 ```
 
-`active` 是 0 或 1。波衰减到几乎为 0 时 JS 端把 active 设为 0，新的点击就可以覆盖它。
+`active` is 0.0 or 1.0. In the vertex shader, `if (b.w < 0.5) continue` skips inactive waves (the branch doesn't skip GPU lanes but the envelope returns 0, so contribution is zero).
 
-### WaveManager (waves.js)
+WebGL2 permits constant loop bounds, so `for (int i = 0; i < MAX_WAVES; i++)` compiles.
 
-```js
-class WaveManager {
-  constructor(maxWaves = 32) {
-    this.maxWaves = maxWaves;
-    this.waves = new Array(maxWaves).fill(null);
-    this.next = 0;  // 环形缓冲指针
-  }
+### WaveManager Ring Buffer (`waves.js`)
 
-  spawn(x, y, time, params) {
-    let slot = this.waves.findIndex(w => !w || !w.active);
-    if (slot === -1) {
-      slot = this.next;
-      this.next = (this.next + 1) % this.maxWaves;
-    }
-    this.waves[slot] = { origin: [x, y], birthTime: time, ...params, active: true };
-  }
+- 32 slots, prefers empty/inactive slots; falls back to ring-buffer eviction
+- Auto-deactivates waves when `exp(-decay * tau) < 0.001`
+- `dataA` / `dataB` are pre-allocated `THREE.Vector4` arrays reused every frame (no GC pressure)
+- A demo wave is spawned at origin on startup (clock t=0)
 
-  uploadToUniforms(material, time) {
-    // 把 32 个槽位 flatten 成两个 vec4 数组传给 shader
-    // 顺便把寿命到的标记 active = false
-  }
-}
-```
+### Mouse Picking (`picker.js`)
 
-### 鼠标 → 世界坐标
+Module-level singletons: `THREE.Plane(z=1, 0)`, `Raycaster`, `Vector2`, `Vector3`. `canvasToWorld(event, canvas, camera)` converts pointer coordinates to the z=0 world plane intersection. Returns `null` if the ray is parallel to the plane.
 
-`picker.js` 用 three.js 的 `Raycaster`：建一个虚拟的 z=0 平面 `new THREE.Plane(new THREE.Vector3(0,0,1), 0)`，把鼠标 NDC 转成 ray，求射线和平面的交点。这就是水面上被点击的位置。
+### Camera & Controls (`main.js`)
 
-### Vertex shader 主循环
+- PerspectiveCamera at `(0, -12, 18)` looking at origin — slight forward tilt for visible depth
+- OrbitControls wired with **left-click disabled** (reserved for wave spawning), middle = dolly, right = rotate
+- Pan disabled; distance clamped [5, 80]; damping factor 0.1
+
+### Fragment Shader (`wave.frag`)
 
 ```glsl
-float totalH = 0.0;
-for (int i = 0; i < MAX_WAVES; i++) {
-    vec4 a = uWaveA[i];
-    vec4 b = uWaveB[i];
-    if (b.w < 0.5) continue;          // active 检查
-
-    vec2 origin = a.xy;
-    float t0    = a.z;
-    float amp   = a.w;
-    float lambda= b.x;
-    float decay = b.y;
-    float phase = b.z;
-
-    float tau = uTime - t0;
-    float r   = distance(worldXY, origin);
-    float k   = 6.2831853 / lambda;
-    float omega = k * uWaveSpeed;
-
-    totalH += amp * envelope(tau, r, uWaveSpeed, decay)
-            * sin(k * r - omega * tau + phase);
-}
-```
-
-WebGL2 允许循环上界是常量（`MAX_WAVES`），所以这个写法能编译。`continue` 在 GPU 上不会真的跳过——所有 lane 还是会算——但 `b.w < 0.5` 时 envelope 是 0，等价于贡献为 0。
-
-### Tweakpane 控制项
-
-- `particleResolution` (32~512, 改了重建几何体)
-- `fieldSize` (世界单位边长)
-- `waveSpeed` (c)
-- `defaultWavelength` (新生波的 λ)
-- `defaultAmplitude`
-- `defaultDecay`
-- `pointSize`
-- `colorLow` / `colorHigh` (高度的两端颜色)
-- `paused` (boolean, 暂停时间推进)
-
-### 颜色映射 (fragment shader)
-
-```glsl
-float t = clamp(vH * 0.5 + 0.5, 0.0, 1.0);
+float t = clamp(vH * 0.5 + 0.5, 0.0, 1.0);  // map [-1,1] → [0,1]
 vec3 col = mix(uColorLow, uColorHigh, t);
-// 圆形点精灵：丢弃离中心 > 0.5 的像素
 vec2 c = gl_PointCoord - 0.5;
-if (dot(c, c) > 0.25) discard;
-gl_FragColor = vec4(col, 1.0);
+if (dot(c, c) > 0.25) discard;               // circular point sprites
 ```
 
 ---
 
-## 运行方式
+## Params Object (shared across modules)
+
+Defined in `main.js`, passed to `createParticleSystem` and `createUI`:
+
+| Key | Default | Range | Notes |
+|-----|---------|-------|-------|
+| `particleResolution` | 200 | 32–512 | Triggers `rebuildParticles()` on change |
+| `fieldSize` | 20 | 5–50 | World units, uploaded as uniform each frame |
+| `waveSpeed` | 5 | 0.5–20 | `c` in wave formula |
+| `defaultWavelength` | 3 | 0.5–10 | `λ` for newly spawned waves |
+| `defaultAmplitude` | 1.5 | 0.1–5 | Peak height for new waves |
+| `defaultDecay` | 0.8 | 0.1–5 | Exponential decay rate |
+| `pointSize` | `4 * devicePixelRatio` | 1–10 | Uploaded as uniform each frame |
+| `colorLow` | `'#1a3a6a'` | — | Wave trough color |
+| `colorHigh` | `'#44bbff'` | — | Wave crest color |
+| `paused` | `false` | — | Freezes `uTime`; time resumes from frozen value |
+
+---
+
+## Development Workflow
+
+### Local
 
 ```bash
-# Terminal 1
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-
-# Terminal 2
 cd frontend
 npm install
 npm run dev
+# → http://localhost:5173
 ```
 
-打开 http://localhost:5173 ，点 canvas 任意位置生成波纹。
-
-### Docker Compose 运行
+### Docker
 
 ```bash
-# 构建并启动所有服务（后台运行）
-docker compose up -d --build
-
-# 查看服务状态
-docker compose ps
-
-# 查看日志（实时跟踪）
-docker compose logs -f
-
-# 只看某个服务的日志
-docker compose logs -f backend
-docker compose logs -f frontend
-
-# 停止所有服务
-docker compose down
-
-# 重新构建某个服务
-docker compose build frontend
-docker compose up -d frontend
+docker compose up -d --build    # start frontend container
+docker compose logs -f          # follow logs
+docker compose down             # stop
 ```
 
-启动后：
-- Frontend: http://localhost:5173
-- Backend: http://localhost:8000
+### Build / Deploy
 
-注意：frontend 构建产物挂载到 backend 容器（`frontend/dist` → `/app/frontend/dist`，只读）。如果 frontend 有改动，需要先重新构建 frontend 再重启 backend。
+```bash
+cd frontend
+npm run build    # outputs to frontend/dist/
+npm run preview  # preview the production build locally
+```
 
----
+`frontend/dist/` is a self-contained static site — serve it with any static host (nginx, GitHub Pages, Netlify, etc.).
 
-## 不做的事
-
-- 不模拟波动方程 PDE。需要的时候再切 GPGPU。
-- 不做 3D 相机轨道。固定俯视角或者轻微倾斜，减少视觉噪声让干涉条纹清晰。
-- 不做边界反射。波传到水面边缘自然衰减消失。
-- 不做色散（不同频率不同速度）。所有波同一个 c。
-- 没有音频反应、没有视频输入、没有上传——backend 留着备用，目前只 serve 静态文件。
+Vite uses `vite-plugin-glsl` to import `.vert` / `.frag` files directly as strings.
 
 ---
 
-## 升级路径备忘
+## Conventions
 
-1. **加反射 / 障碍**：切到 PDE 路线，需要 ping-pong 两张 height texture，每帧推进波动方程的有限差分。这时 `position.frag` / `velocity.frag` 就用上了。
-2. **粒子也参与流动**：让粒子在 xy 平面也被波的梯度推动，做出「漂浮物」感。需要在 vertex shader 里数值算 ∂h/∂x 和 ∂h/∂y。
-3. **超过 32 个波**：把 uniform 数组换成 data texture，shader 里 texelFetch 读取。理论上几千个波都行。
-4. **音频驱动**：用 Web Audio AnalyserNode，让低频能量转成 amplitude 上传成 uniform，鼓点自动 spawn 波纹。
+- **No TypeScript** — plain ES modules throughout
+- **No bundler abstractions** — direct named exports (`createParticleSystem`, `WaveManager`, `canvasToWorld`, `createUI`)
+- **Shader imports** — use `import shader from './shaders/foo.vert'` (vite-plugin-glsl resolves to string)
+- **Uniform upload** — all uniforms set in the animation loop in `main.js`; `WaveManager.uploadToUniforms()` is called every frame
+- **No `aGridUv` attribute** — the vertex shader reads the built-in `position` attribute (xy = UV, z = 0); the design doc's `aGridUv` name was never implemented
+- **Color strings** — params stores hex strings (`'#rrggbb'`); `THREE.Color.set()` accepts them directly
+- **Memory** — `dataA`/`dataB` in WaveManager are pre-allocated; `rebuildParticles()` calls `.dispose()` on old geometry and material before replacing
+
+---
+
+## What Is Intentionally Not Implemented
+
+- PDE / GPGPU ping-pong simulation (no `position.frag` / `velocity.frag`)
+- Boundary reflections
+- Dispersion (all waves share one speed `c`)
+- 3D orbit camera (OrbitControls is present but left-click is blocked; right-drag rotates)
+- Backend / server-side logic (pure client-side app)
+- Audio reactivity or video input
+
+---
+
+## Upgrade Path Notes
+
+1. **>32 simultaneous waves** — replace uniform arrays with a data texture; read in shader via `texelFetch`
+2. **Reflections / obstacles** — switch to PDE finite-difference simulation with ping-pong height textures
+3. **Particle advection** — compute `∂h/∂x`, `∂h/∂y` in vertex shader to drift particles along wave gradient
+4. **Audio-driven waves** — pipe `AnalyserNode` data into amplitude uniform; spawn waves on beats
