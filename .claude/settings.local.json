@@ -9,7 +9,11 @@
       "Bash(curl -s http://localhost:5173/src/particles.js)",
       "Bash(curl -s \"http://localhost:5173/src/shaders/wave.vert?import\")",
       "Bash(curl -s \"http://localhost:5173/node_modules/.vite/deps/tweakpane.js?v=ae82d4f7\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git pull *)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npm run *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

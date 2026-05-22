@@ -137,22 +137,32 @@ Defined in `main.js`, passed to `createParticleSystem` and `createUI`:
 
 ## Development Workflow
 
-### Local
+### Local (npm)
 
 ```bash
 cd frontend
-npm install
-npm run dev
-# → http://localhost:5173
+npm install          # install dependencies (first run only)
+npm run dev          # start Vite dev server with hot reload
+# → open http://localhost:5173
+
+npm run dev -- --host 0.0.0.0   # expose on LAN (access from other devices)
+npm run dev -- --port 3000      # use a different port
 ```
 
-### Docker
+Stop the dev server with `Ctrl+C` in its terminal.
+
+### Docker (docker compose)
 
 ```bash
-docker compose up -d --build    # start frontend container
-docker compose logs -f          # follow logs
-docker compose down             # stop
+docker compose up -d --build    # build images and start frontend container (detached)
+docker compose up -d            # start without rebuilding
+docker compose ps               # show running services
+docker compose logs -f          # follow logs (Ctrl+C to detach)
+docker compose restart frontend # restart a single service
+docker compose down             # stop and remove containers
 ```
+
+The container also serves on http://localhost:5173 (port mapped in `docker-compose.yml`).
 
 ### Build / Deploy
 
@@ -197,3 +207,4 @@ Vite uses `vite-plugin-glsl` to import `.vert` / `.frag` files directly as strin
 2. **Reflections / obstacles** — switch to PDE finite-difference simulation with ping-pong height textures
 3. **Particle advection** — compute `∂h/∂x`, `∂h/∂y` in vertex shader to drift particles along wave gradient
 4. **Audio-driven waves** — pipe `AnalyserNode` data into amplitude uniform; spawn waves on beats
+
